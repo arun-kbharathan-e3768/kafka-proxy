@@ -503,17 +503,6 @@ func readinessHandler(w http.ResponseWriter, r *http.Request) {
 
 // isKafkaReady checks if Kafka is ready to serve traffic
 func isKafkaReady() bool {
-	// Determine which address to check
-	var kafkaAddress string
-	if c.Proxy.ReadinessServiceName != "" {
-		kafkaAddress = c.Proxy.ReadinessServiceName
-	} else if len(c.Proxy.BootstrapServers) > 0 {
-		kafkaAddress = c.Proxy.BootstrapServers[0].BrokerAddress
-	} else {
-		logrus.Info("No bootstrap servers or readiness service configured, considering ready")
-		return true
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -534,10 +523,36 @@ func isKafkaReady() bool {
 		SASLMechanism: mechanism,
 	}
 
+	// If ReadinessServiceName is set, use it instead of bootstrap servers
+	if c.Proxy.ReadinessServiceName != "" {
+		return checkKafkaConnection(ctx, dialer, c.Proxy.ReadinessServiceName)
+	}
+
+	// Use bootstrap servers if available
+	if len(c.Proxy.BootstrapServers) > 0 {
+		// Track if at least one server is accessible
+		for _, server := range c.Proxy.BootstrapServers {
+			if checkKafkaConnection(ctx, dialer, server.BrokerAddress) {
+				return true
+			}
+		}
+
+		// All servers are inaccessible
+		logrus.Info("All Kafka bootstrap servers are inaccessible")
+		return false
+	}
+
+	// No bootstrap servers or readiness service configured
+	logrus.Info("No bootstrap servers or readiness service configured, considering ready")
+	return true
+}
+
+// checkKafkaConnection attempts to connect to the provided kafka address and verify it's working
+func checkKafkaConnection(ctx context.Context, dialer *kafka.Dialer, kafkaAddress string) bool {
 	// Create a connection to Kafka
 	conn, err := dialer.DialContext(ctx, "tcp", kafkaAddress)
 	if err != nil {
-		logrus.Infof("Failed to connect to Kafka: %v", err)
+		logrus.Infof("Failed to connect to Kafka at %s: %v", kafkaAddress, err)
 		return false
 	}
 	defer conn.Close()
@@ -545,23 +560,24 @@ func isKafkaReady() bool {
 	// Try to get broker metadata - this is a lightweight operation
 	brokers, err := conn.Brokers()
 	if err != nil {
-		logrus.Infof("Failed to get Kafka brokers: %v", err)
+		logrus.Infof("Failed to get Kafka brokers from %s: %v", kafkaAddress, err)
 		return false
 	}
 
 	if len(brokers) == 0 {
-		logrus.Debug("No Kafka brokers available")
+		logrus.Debugf("No Kafka brokers available from %s", kafkaAddress)
 		return false
 	}
 
-	// Optional: Try to list topics (very lightweight)
-	partitions, err := conn.ReadPartitions()
+	// Check API versions - this is one of the lightest weight operations
+	// and doesn't require listing all topics/partitions
+	apiVersions, err := conn.ApiVersions()
 	if err != nil {
-		logrus.Infof("Failed to read partitions: %v", err)
+		logrus.Infof("Failed to retrieve API versions from %s: %v", kafkaAddress, err)
 		return false
 	}
 
-	logrus.Infof("Kafka is ready - found %d brokers and %d partitions", len(brokers), len(partitions))
+	logrus.Infof("Kafka at %s is ready - found %d brokers and %d API versions", kafkaAddress, len(brokers), len(apiVersions))
 	return true
 }
 
