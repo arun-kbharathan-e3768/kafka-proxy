@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path"
 	"runtime"
+	"strings"
 
 	"github.com/grepplabs/kafka-proxy/config"
 	"github.com/grepplabs/kafka-proxy/proxy"
@@ -30,7 +31,6 @@ import (
 	"time"
 
 	"errors"
-	"strings"
 
 	"github.com/grepplabs/kafka-proxy/pkg/apis"
 	localauth "github.com/grepplabs/kafka-proxy/plugin/local-auth/shared"
@@ -525,7 +525,24 @@ func isKafkaReady() bool {
 
 	// If ReadinessServiceName is set, use it instead of bootstrap servers
 	if c.Proxy.ReadinessServiceName != "" {
-		return checkKafkaConnection(ctx, dialer, c.Proxy.ReadinessServiceName)
+		// Split by comma in case multiple service names are provided
+		readinessServices := strings.Split(c.Proxy.ReadinessServiceName, ",")
+
+		// Try connecting to each service, return true if any succeeds
+		for _, serviceName := range readinessServices {
+			serviceName = strings.TrimSpace(serviceName)
+			if serviceName == "" {
+				continue
+			}
+
+			if checkKafkaConnection(ctx, dialer, serviceName) {
+				return true
+			}
+		}
+
+		// All readiness services failed
+		logrus.Info("All Kafka readiness services are inaccessible")
+		return false
 	}
 
 	// Use bootstrap servers if available
